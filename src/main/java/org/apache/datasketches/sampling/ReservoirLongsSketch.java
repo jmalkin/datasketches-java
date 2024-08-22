@@ -34,6 +34,7 @@ import static org.apache.datasketches.sampling.SamplingUtil.pseudoHypergeometric
 import static org.apache.datasketches.sampling.SamplingUtil.pseudoHypergeometricUBonP;
 
 import java.util.Arrays;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Predicate;
 
 import org.apache.datasketches.common.Family;
@@ -327,6 +328,23 @@ public final class ReservoirLongsSketch {
         final int newSlot = SamplingUtil.rand().nextInt(reservoirSize_);
         data_[newSlot] = item;
       }
+    }
+  }
+
+  void partialShuffle(int numSamples) {
+    // we can perform a Fisher-Yates style shuffle, stopping after
+    // numSamples points since subsequent swaps would only be
+    // between items after numSamples. This is valid since a
+    // point from anywhere in the initial array would be eligible
+    // to end up in the final subsample.
+
+    final int dataLen = data_.length;
+    for (int i = 0; i < numSamples; ++i) {
+      final int j = i + SamplingUtil.rand().nextInt(dataLen - i);
+      // swap i and j
+      final long tmp = data_[i];
+      data_[i] = data_[j];
+      data_[j] = tmp;
     }
   }
 

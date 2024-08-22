@@ -29,6 +29,8 @@ import static org.apache.datasketches.sampling.PreambleUtil.extractMaxK;
 import static org.apache.datasketches.sampling.PreambleUtil.extractPreLongs;
 import static org.apache.datasketches.sampling.PreambleUtil.extractSerVer;
 
+import java.util.concurrent.ThreadLocalRandom;
+
 import org.apache.datasketches.common.Family;
 import org.apache.datasketches.common.SketchesArgumentException;
 import org.apache.datasketches.memory.Memory;
@@ -327,17 +329,20 @@ public final class ReservoirLongsUnion {
     } else if (sketchIn.getImplicitSampleWeight() < (gadget_.getN()
         / ((double) (gadget_.getK() - 1)))) {
       // implicit weights in sketchIn are light enough to merge into gadget
-      twoWayMergeInternalWeighted(sketchIn);
+      //twoWayMergeInternalWeighted(sketchIn);
+      newStyleMergeInternalWeighted(sketchIn);
     } else {
       // Use next next line for an assert/exception?
       // gadget_.getImplicitSampleWeight() < sketchIn.getN() / ((double) (sketchIn.getK() - 1)))
       // implicit weights in gadget are light enough to merge into sketchIn, so swap first
       final ReservoirLongsSketch tmpSketch = gadget_;
       gadget_ = (isModifiable ? sketchIn : sketchIn.copy());
-      twoWayMergeInternalWeighted(tmpSketch);
+      //twoWayMergeInternalWeighted(tmpSketch);
+      newStyleMergeInternalWeighted(tmpSketch);
     }
   }
 
+  // unit weights from source so treat as regular update calls
   // should be called ONLY by twoWayMergeInternal
   private void twoWayMergeInternalStandard(final ReservoirLongsSketch source) {
     assert (source.getN() <= source.getK());
@@ -347,6 +352,7 @@ public final class ReservoirLongsUnion {
     }
   }
 
+  // weights for one sketch treated as lighter than 1.0
   // should be called ONLY by twoWayMergeInternal
   private void twoWayMergeInternalWeighted(final ReservoirLongsSketch source) {
     // gadget_ capable of accepting (light) general weights
@@ -385,4 +391,45 @@ public final class ReservoirLongsUnion {
     gadget_.forceIncrementItemsSeen(source.getN());
     assert (checkN == gadget_.getN());
   }
+
+
+  private void newStyleMergeInternalWeighted(final ReservoirLongsSketch source) {
+    // gadget_ capable of accepting (light) general weights
+    assert (gadget_.getN() >= gadget_.getK());
+
+    final int numTotalSamples = source.getK();
+
+    // determine how many samples we want from each sketch
+    long nSource = source.getN();
+    long nGadget = gadget_.getN();
+    int numGadgetSamples = 0;
+    for (int i = 0; i < numTotalSamples; ++ i) {
+      long r = ThreadLocalRandom.current().nextLong(nSource + nGadget);
+      if (r < nGadget) {
+        ++numGadgetSamples;
+        --nGadget;
+      } else {
+        --nSource;
+      }
+    }
+
+    // Randomly permute the reservoirs, but only as many swap as needed for the merge.
+    // This does not distort the merge result since points after the target number will
+    // permute only with each other and not be included in the merge output anyway. And
+    // all points are equally likely to be in the initial sample.
+    gadget_.partialShuffle(numGadgetSamples);
+    source.partialShuffle(numTotalSamples - numGadgetSamples);
+
+    // take samples
+    int sourceIdx = 0;
+    for (int i = numGadgetSamples; i < numTotalSamples; ++i, sourceIdx++) {
+      gadget_.insertValueAtPosition(source.getValueAtPosition(sourceIdx), i);
+    }
+
+    // do a shuffle of all items since otherwise they're not uniformly distributed
+    //gadget_.shuffleReservoir();
+
+    gadget_.forceIncrementItemsSeen(source.getN());
+  }
+
 }

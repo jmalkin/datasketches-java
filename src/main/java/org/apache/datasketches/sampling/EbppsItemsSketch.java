@@ -27,6 +27,7 @@ import static org.apache.datasketches.sampling.PreambleUtil.HAS_PARTIAL_ITEM_MAS
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 
 import org.apache.datasketches.common.ArrayOfItemsSerDe;
 import org.apache.datasketches.common.Family;
@@ -273,13 +274,14 @@ public final class EbppsItemsSketch<T> {
    * @param other the sketch to merge into the current object
    */
   public void merge(final EbppsItemsSketch<T> other) {
+    boolean altMerge = true;
     if (other.getCumulativeWeight() == 0.0) {
       return;
     } else if (other.getCumulativeWeight() > cumulativeWt_) {
       // need to swap this with other
       // make a copy of other, merge into it, and take the result
       final EbppsItemsSketch<T> copy = new EbppsItemsSketch<>(other);
-      copy.internalMerge(this);
+      copy.internalMerge(this, altMerge);
       k_ = copy.k_;
       n_ = copy.n_;
       cumulativeWt_ = copy.cumulativeWt_;
@@ -287,12 +289,17 @@ public final class EbppsItemsSketch<T> {
       rho_ = copy.rho_;
       sample_ = copy.sample_;
     } else {
-      internalMerge(other);
+      internalMerge(other, altMerge);
     }
   }
 
   // merge implementation called exclusively from public merge()
-  private void internalMerge(final EbppsItemsSketch<T> other) {
+  private void internalMerge(final EbppsItemsSketch<T> other, boolean altMerge) {
+    if (altMerge) {
+      alternativeInternalMerge(other);
+      return;
+    }
+
     // assumes that other.cumulativeWeight_ <= cumulativeWt_m
     // which must be checked before calling this
 
@@ -350,6 +357,62 @@ public final class EbppsItemsSketch<T> {
     // avoid numeric issues by setting cumulative weight to the
     // pre-computed value
     cumulativeWt_ = finalCumWt;
+    n_ = newN;
+  }
+
+  private void alternativeInternalMerge(final EbppsItemsSketch<T> other) {
+
+    // assumes that other.cumulativeWeight_ <= cumulativeWt_m
+    // which must be checked before calling this
+
+    // we can use the idea behind the naive merge, namely to downsample each
+    // sketch A and B as A.cum_wt / (A.cum_wt + B.cum_wt) and B.cum_wt / (A.cum_wt + B.cum_wt),
+    // respectively. Those downsampling weights will provide a scale factor for
+    // C from each sketch, which can then be added to determined the total number
+    // of items in the merged result. We can then (randomly) determine how many samples
+    // to take from each input.
+
+    final double selfDownsampleRate = cumulativeWt_ / (cumulativeWt_ + other.cumulativeWt_);
+    final double otherDownsampleRate = other.cumulativeWt_ / (cumulativeWt_ + other.cumulativeWt_);
+
+    final double finalCumWt = cumulativeWt_ + other.cumulativeWt_;
+    final double newWtMax = Math.max(wtMax_, other.wtMax_);
+    k_ = Math.min(k_, other.k_);
+    final long newN = n_ + other.n_;
+
+    final double numItemsToSample = selfDownsampleRate * getC() + otherDownsampleRate * other.getC();
+    // determine how many samples we want from each sketch
+    double nSource = other.cumulativeWt_;
+    double nSelf = cumulativeWt_;
+    int numSelfSamples = 0;
+    int numSourceSamples = 0;
+    for (int i = 0; i < numItemsToSample; ++ i) {
+      double r = ThreadLocalRandom.current().nextDouble(nSource + nSelf);
+      if (r < nSelf) {
+        ++numSelfSamples;
+        --nSelf;
+      } else {
+        ++numSourceSamples;
+        --nSource;
+      }
+    }
+
+    // one of the items will be a partial item, whic is fine as long as things are randomly permuted
+    // this is inefficient but a starting point to validate correctness
+    ArrayList<T> resultItems = new ArrayList<>(Arrays.asList(sample_.getAllSamples(sample_.getSample().get(0).getClass())).subList(0, numSelfSamples));
+    resultItems.addAll(Arrays.asList(other.sample_.getAllSamples(other.sample_.getSample().get(0).getClass())).subList(0, numSourceSamples));
+
+    double newC = sample_.getC() * selfDownsampleRate + other.sample_.getC() * otherDownsampleRate;
+    T partialItem = null;
+    if (resultItems.size() > newC) {
+      partialItem = resultItems.remove(resultItems.size() - 1);
+    }
+
+    sample_ = new EbppsItemsSample<>(resultItems, partialItem, newC);
+
+    wtMax_ = newWtMax;
+    cumulativeWt_ = finalCumWt;
+    rho_ = Math.min(1.0 / wtMax_, k_ / cumulativeWt_);
     n_ = newN;
   }
 
